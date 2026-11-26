@@ -195,6 +195,7 @@ textarea.paste{width:100%;min-height:140px;border:0;border-radius:12px;backgroun
     <div class="sec-title">การนำเข้าสลิป</div>
     <div class="list">
       <label class="item"><span class="ic">⚡</span><span class="mid"><span class="t1" style="display:block">บันทึกเองถ้าอ่านครบ</span><span class="t2" style="display:block;white-space:normal">มียอดเงิน วันที่ และเลขอ้างอิง ไม่ต้องกดยืนยันทีละใบ</span></span><input type="checkbox" class="sw" id="optAuto"></label>
+      <label class="item"><span class="ic">🔳</span><span class="mid"><span class="t1" style="display:block">อ่านเฉพาะรูปที่มี QR สลิป</span><span class="t2" style="display:block;white-space:normal">เร็วกว่ามาก รูปอื่นข้ามทันที ปิดได้ถ้าสลิปบางธนาคารไม่มี QR</span></span><input type="checkbox" class="sw" id="optQR"></label>
       <label class="item"><span class="ic">🔁</span><span class="mid"><span class="t1" style="display:block">ข้ามการโอนระหว่างบัญชีตัวเอง</span><span class="t2" style="display:block;white-space:normal">ผู้โอนและผู้รับเป็นชื่อของฉันทั้งคู่ (ต้องใส่ชื่อด้านบน)</span></span><input type="checkbox" class="sw" id="optSelf"></label>
     </div>
 
@@ -585,37 +586,42 @@ function importText(txt){
 }
 
 /* ---------- scan images with on-device OCR ---------- */
-let workerP=null;
 function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('load'));document.head.appendChild(s)})}
-function getWorker(onProg){
-  if(!workerP)workerP=(async()=>{
-    if(!window.Tesseract)await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js');
-    return Tesseract.createWorker(['tha','eng'],1,{logger:m=>onProg&&onProg(m)});
-  })().catch(e=>{workerP=null;throw e});
-  return workerP;
+/* Thai slip QR (Bank of Thailand slip-verification mini QR): holds bank code + transaction ref, no amount/date */
+const BANK_CODES={'002':'กรุงเทพ','004':'กสิกรไทย','006':'กรุงไทย','011':'ttb','014':'ไทยพาณิชย์','017':'Citibank','022':'CIMB','024':'UOB','025':'กรุงศรี','030':'ออมสิน','033':'ธอส.','034':'ธ.ก.ส.','066':'อิสลาม','067':'ทิสโก้','069':'เกียรตินาคินภัทร','070':'ICBC','071':'ไทยเครดิต','073':'แลนด์ แอนด์ เฮ้าส์'};
+function tlv(str){const o={};let i=0;while(i+4<=str.length){const t=str.substr(i,2),l=parseInt(str.substr(i+2,2),10);if(isNaN(l))break;o[t]=str.substr(i+4,l);i+=4+l}return o}
+function parseSlipQR(data){
+  if(!data||!/^00\d{2}000600000101/.test(data))return null;
+  const inner=tlv(tlv(data)['00']||'');if(!inner['02'])return null;
+  return {ref:inner['02'],bank:BANK_CODES[inner['01']]||''};
 }
-async function recycleWorker(){const p=workerP;workerP=null;try{(await p).terminate()}catch(e){}}
-function prepImage(file){
-  return new Promise((res,rej)=>{
-    const url=URL.createObjectURL(file);const img=new Image();
-    img.onload=()=>{
-      const W0=img.width,H0=img.height,ratio=Math.max(W0,H0)/Math.min(W0,H0);
-      if(Math.max(W0,H0)>=2800&&!/png/i.test(file.type)&&ratio<1.9){URL.revokeObjectURL(url);img.src='';res({camera:true});return}
-      const max=1500, sc=Math.min(1,max/Math.max(img.width,img.height));
-      const c=document.createElement('canvas');c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);
-      const x=c.getContext('2d');x.drawImage(img,0,0,c.width,c.height);
-      // grayscale + contrast for better OCR
-      const d=x.getImageData(0,0,c.width,c.height),p=d.data;
-      for(let i=0;i<p.length;i+=4){let g=.299*p[i]+.587*p[i+1]+.114*p[i+2];g=(g-128)*1.35+128;g=g<0?0:g>255?255:g;p[i]=p[i+1]=p[i+2]=g}
-      x.putImageData(d,0,0);
-      // small preview for the review sheet
-      const pc=document.createElement('canvas'),ps=Math.min(1,520/img.height);pc.width=Math.round(img.width*ps);pc.height=Math.round(img.height*ps);pc.getContext('2d').drawImage(img,0,0,pc.width,pc.height);
-      const preview=pc.toDataURL('image/jpeg',.6);pc.width=pc.height=0;URL.revokeObjectURL(url);img.src='';res({canvas:c,preview});
-    };
-    img.onerror=()=>{URL.revokeObjectURL(url);rej(new Error('img'))};
-    img.src=url;
-  });
+function findQR(img){
+  if(!window.jsQR)return null;
+  for(const size of [1000,1800]){
+    const sc=Math.min(1,size/Math.max(img.width,img.height));
+    const c=document.createElement('canvas');c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);
+    const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(img,0,0,c.width,c.height);
+    const d=x.getImageData(0,0,c.width,c.height);c.width=c.height=0;
+    const q=jsQR(d.data,d.width,d.height,{inversionAttempts:'dontInvert'});
+    if(q&&q.data)return q.data;
+    if(sc===1)break;
+  }
+  return null;
 }
+function loadImg(file){
+  return new Promise((res,rej)=>{const url=URL.createObjectURL(file);const img=new Image();
+    img.onload=()=>{URL.revokeObjectURL(url);res(img)};img.onerror=()=>{URL.revokeObjectURL(url);rej(new Error('img'))};img.src=url});
+}
+function ocrCanvas(img){
+  const sc=Math.min(1,1400/Math.max(img.width,img.height));
+  const c=document.createElement('canvas');c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);
+  const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(img,0,0,c.width,c.height);
+  const d=x.getImageData(0,0,c.width,c.height),p=d.data; // grayscale + contrast
+  for(let i=0;i<p.length;i+=4){let g=.299*p[i]+.587*p[i+1]+.114*p[i+2];g=(g-128)*1.35+128;g=g<0?0:g>255?255:g;p[i]=p[i+1]=p[i+2]=g}
+  x.putImageData(d,0,0);return c;
+}
+function previewOf(img){const c=document.createElement('canvas'),s=Math.min(1,520/img.height);c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);c.getContext('2d').drawImage(img,0,0,c.width,c.height);const u=c.toDataURL('image/jpeg',.6);c.width=c.height=0;return u}
+const isCamera=(img,file)=>{const r=Math.max(img.width,img.height)/Math.min(img.width,img.height);return Math.max(img.width,img.height)>=2800&&!/png/i.test(file.type)&&r<1.9};
 const prog=(txt,frac)=>{const p=document.getElementById('progress');p.classList.add('on');document.getElementById('progressText').textContent=txt;document.getElementById('progressBar').style.width=Math.round((frac||0)*100)+'%'};
 const progOff=()=>document.getElementById('progress').classList.remove('on');
 document.getElementById('btnScan').onclick=()=>document.getElementById('fileIn').click();
@@ -629,39 +635,49 @@ document.getElementById('fileIn').onchange=async e=>{
   const files=[...e.target.files];e.target.value='';if(!files.length)return;
   qSaved=[];qStats=newStats();scanStop=false;const seen=new Set(),reviews=[];
   let wake=null;try{wake=await navigator.wakeLock.request('screen')}catch(_){}
-  // up to 2 OCR workers in parallel on phones with enough cores
+  prog('กำลังเตรียม…',0);
+  try{if(!window.jsQR)await loadScript('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js')}catch(_){}
+  const qrOnly=SET.qrOnly!==false&&!!window.jsQR;
   const lanes=Math.min(files.length,(navigator.hardwareConcurrency||2)>=4?2:1);
-  const workers=[];
-  try{
-    prog('กำลังเตรียมตัวอ่านสลิป… (ครั้งแรกจะโหลดนานหน่อย)',0);
-    for(let l=0;l<lanes;l++)workers.push(await makeWorker(m=>{if(m.status&&/load|init/i.test(m.status))prog('กำลังโหลดตัวอ่านภาษาไทย… (ครั้งแรกเท่านั้น)',m.progress||0)}));
-  }catch(err){progOff();qStats=null;for(const w of workers)try{w.terminate()}catch(_){}toast('โหลดตัวอ่านสลิปไม่ได้ ต้องต่ออินเทอร์เน็ตในครั้งแรก');return}
+  const workers=new Array(lanes).fill(null);let ocrFail=false;
+  const getW=async l=>{if(!workers[l]){if(ocrFail)throw new Error('ocr');try{workers[l]=await makeWorker(m=>{if(m.status&&/load|init/i.test(m.status))prog('กำลังโหลดตัวอ่านภาษาไทย… (ครั้งแรกเท่านั้น)',m.progress||0)})}catch(err){ocrFail=true;throw err}}return workers[l]};
   let next=0,done=0;
-  const show=()=>{const st=qStats;prog(`อ่านรูป ${done}/${files.length} · บันทึกแล้ว ${st.auto} · รอตรวจ ${reviews.length} · ข้าม ${st.dup+st.self+st.notslip}`,done/files.length)};
-  show();
+  const show=()=>{const st=qStats;prog(`ดูแล้ว ${done}/${files.length} รูป · บันทึก ${st.auto} · รอตรวจ ${reviews.length} · ข้าม ${st.dup+st.self+st.notslip}`,done/files.length)};
   const lane=async l=>{
-    let w=workers[l],count=0;
+    let count=0;
     while(!scanStop&&next<files.length){
       const f=files[next++];
       try{
-        const im=await prepImage(f);
-        if(im.camera){qStats.notslip++}
+        const img=await loadImg(f);
+        if(isCamera(img,f)){qStats.notslip++}
         else{
-          if(count>0&&count%25===0){try{await w.terminate()}catch(_){}w=workers[l]=await makeWorker()} // free memory on long batches
-          count++;
-          const r=await w.recognize(im.canvas);im.canvas.width=im.canvas.height=0;
-          const d=parseSlip(r.data.text);const k=classify(d,seen);qStats[k]++;
-          if(k==='auto'){saveDraft(d);if(qStats.auto%5===0)saveTX()}
-          else if(k==='review'){d.img=im.preview;reviews.push(d)}
+          const qr=parseSlipQR(findQR(img));
+          if(!qr&&qrOnly){qStats.notslip++}                                         // no slip QR -> skip without OCR
+          else if(qr&&(seen.has(qr.ref)||TX.some(x=>x.ref===qr.ref))){qStats.dup++} // already saved -> skip without OCR
+          else{
+            const w=await getW(l);
+            if(count>0&&count%25===0){try{await w.terminate()}catch(_){}workers[l]=null}
+            count++;
+            const c=ocrCanvas(img);const r=await (await getW(l)).recognize(c);c.width=c.height=0;
+            const d=parseSlip(r.data.text);
+            if(qr){d.ref=qr.ref;d.looksSlip=true;if(qr.bank)d.bank=qr.bank}
+            const k=classify(d,seen);qStats[k]++;
+            if(k==='auto'){saveDraft(d);if(qStats.auto%5===0)saveTX()}
+            else if(k==='review'){d.img=previewOf(img);reviews.push(d)}
+          }
         }
+        img.src='';
       }catch(err){qStats.fail++}
       done++;show();
     }
   };
+  show();
   await Promise.all(workers.map((_,l)=>lane(l)));
-  for(const w of workers)try{w.terminate()}catch(_){}
+  for(const w of workers)try{w&&w.terminate()}catch(_){}
   try{wake&&wake.release()}catch(_){}
-  progOff();finishBatch(reviews);
+  progOff();
+  if(ocrFail&&!qSaved.length&&!reviews.length){qStats=null;toast('โหลดตัวอ่านสลิปไม่ได้ ต้องต่ออินเทอร์เน็ตในครั้งแรก');return}
+  finishBatch(reviews);
 };
 
 /* ---------- settings ---------- */
@@ -669,6 +685,7 @@ const namesIn=document.getElementById('myNames');namesIn.value=SET.names||'';
 namesIn.onchange=()=>{SET.names=namesIn.value;saveSET();toast('บันทึกชื่อแล้ว')};
 const optAuto=document.getElementById('optAuto'),optSelf=document.getElementById('optSelf');
 optAuto.checked=SET.autoSave!==false;optSelf.checked=SET.skipSelf!==false;
+const optQR=document.getElementById('optQR');optQR.checked=SET.qrOnly!==false;optQR.onchange=()=>{SET.qrOnly=optQR.checked;saveSET()};
 optAuto.onchange=()=>{SET.autoSave=optAuto.checked;saveSET()};optSelf.onchange=()=>{SET.skipSelf=optSelf.checked;saveSET()};
 document.getElementById('btnTheme').onclick=()=>{SET.theme={auto:'light',light:'dark',dark:'auto'}[SET.theme||'auto'];saveSET();applyTheme()};
 function download(name,data,type){
