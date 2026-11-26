@@ -1,6 +1,6 @@
 {
-  "name": "บันทึกรายรับรายจ่าย",
-  "short_name": "รายรับจ่าย",
+  "name": "MS-Pocket",
+  "short_name": "MS-Pocket",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
